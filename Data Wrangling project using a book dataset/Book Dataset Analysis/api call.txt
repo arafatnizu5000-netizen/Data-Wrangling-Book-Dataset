@@ -1,0 +1,89 @@
+import pandas as pd
+import requests
+import time
+
+# ১. Open Library Subjects API URL
+url = "https://openlibrary.org/subjects/thriller.json"
+
+# ২. API-এর parameters
+query_parameters = {
+    "limit": 40
+}
+
+headers = {
+    "User-Agent": "Mozilla/5.0 (compatible; BookDataCollector/1.0)"
+}
+
+print("Open Library API থেকে ডেটা সংগ্রহ করা হচ্ছে... দয়া করে অপেক্ষা করুন...")
+
+max_retries = 5
+response = None
+
+for attempt in range(1, max_retries + 1):
+    response = requests.get(url, params=query_parameters, headers=headers, timeout=10)
+    print(f"Attempt {attempt} → Status Code: {response.status_code}")
+
+    if response.status_code == 429:
+        wait_time = 5 * attempt
+        print(f"⏳ Rate limit হয়েছে। {wait_time} সেকেন্ড অপেক্ষা করে আবার চেষ্টা করা হচ্ছে...")
+        time.sleep(wait_time)
+        continue
+    else:
+        break
+
+try:
+    response.raise_for_status()
+    raw_data = response.json()
+
+    # ৪. প্রয়োজনীয় data আলাদা করা
+    cleaned_books_list = []
+
+    if "works" in raw_data:
+        for item in raw_data["works"]:
+
+            # Authors
+            authors = item.get("authors", [])
+            author_name = ", ".join([a.get("name", "Unknown") for a in authors]) if authors else "Unknown"
+
+            # Publish Year
+            publish_year = item.get("first_publish_year", "Unknown")
+
+            # Subjects (as a stand-in for Genre)
+            subjects = item.get("subject", [])
+            genre = ", ".join(subjects[:3]) if subjects else "Thriller"
+
+            book_info = {
+                "Title": item.get("title", "Unknown"),
+                "Author": author_name,
+                "Publish_Year": publish_year,
+                "Edition_Count": item.get("edition_count", 0),
+                "Ebook_Available": item.get("has_fulltext", False),
+                "Genre": genre,
+                "Open_Library_Key": item.get("key", "")
+            }
+
+            cleaned_books_list.append(book_info)
+    else:
+        print("⚠️ কোনো 'works' পাওয়া যায়নি। raw_data:", raw_data)
+
+    # ৫. DataFrame তৈরি
+    df = pd.DataFrame(cleaned_books_list)
+
+    # ৬. Output দেখানো
+    print("\n🎉 ডেটা সফলভাবে সংগ্রহ করা হয়েছে!")
+    print("\n--- প্রথম ৫টি বইয়ের ডেটা ---")
+    print(df.head())
+    print("\n--- মোট বই সংগ্রহ হয়েছে:", len(df), "টি ---")
+
+    # ৭. CSV file হিসেবে save
+    df.to_csv(
+        "my_openlibrary_books_data.csv",
+        index=False,
+        encoding="utf-8-sig"
+    )
+    print("\n💾 ডেটা 'my_openlibrary_books_data.csv' নামে save হয়েছে।")
+
+except requests.exceptions.RequestException as e:
+    print(f"❌ API Request-এ সমস্যা হয়েছে: {e}")
+except Exception as e:
+    print(f"❌ ডেটা কালেকশনে সমস্যা হয়েছে: {e}")

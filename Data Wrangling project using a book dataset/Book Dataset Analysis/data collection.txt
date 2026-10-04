@@ -1,0 +1,305 @@
+```python
+import pandas as pd
+import asyncio
+import aiohttp
+import time
+import os
+import json
+
+headers = {
+    "User-Agent": "Mozilla/5.0 (compatible; BookDataCollector/1.0)"
+}
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+csv_file = os.path.join(SCRIPT_DIR, "my_openlibrary_books_data.csv")
+enrich_progress_file = os.path.join(SCRIPT_DIR, "enrich_progress.txt")
+author_cache_file = os.path.join(SCRIPT_DIR, "author_details_cache.json")
+
+print("Script location:", SCRIPT_DIR)
+
+ENRICH_LIMIT = None        # None means all books
+MAX_CONCURRENT = 25        # Number of requests running at the same time
+SAVE_EVERY = 30            # Save a checkpoint after every 30 books
+
+# ================= Load Data =================
+
+if not os.path.exists(csv_file):
+    print("Previous CSV file was not found.")
+    exit()
+
+df = pd.read_csv(csv_file)
+print(f"Loaded {len(df)} books from the CSV file.")
+
+for col in ["Average_Rating", "Rating_Count", "Page_Count",
+            "Want_To_Read_Count", "Currently_Reading_Count", "Already_Read_Count",
+            "Author_Birth_Date", "Author_Death_Date", "Author_Bio"]:
+    if col not in df.columns:
+        df[col] = None
+
+completed_keys = set()
+
+if os.path.exists(enrich_progress_file):
+    with open(enrich_progress_file, "r", encoding="utf-8") as f:
+        completed_keys = set(line.strip() for line in f)
+
+author_cache = {}
+
+if os.path.exists(author_cache_file):
+    with open(author_cache_file, "r", encoding="utf-8") as f:
+        author_cache = json.load(f)
+
+author_cache_lock = asyncio.Lock()
+progress_lock = asyncio.Lock()
+
+processed_count = 0
+start_time = time.time()
+
+
+async def fetch_json(session, url, params=None, max_attempts=4):
+    for attempt in range(1, max_attempts + 1):
+        try:
+            async with session.get(
+                url,
+                params=params or {},
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=15)
+            ) as resp:
+
+                if resp.status == 429:
+                    await asyncio.sleep(min(4 * attempt, 15))
+                    continue
+
+                if resp.status == 404:
+                    return None
+
+                resp.raise_for_status()
+                return await resp.json()
+
+        except (asyncio.TimeoutError, aiohttp.ClientConnectionError):
+            await asyncio.sleep(min(2 * attempt, 10))
+
+        except aiohttp.ClientError:
+            return None
+
+    return None
+
+
+async def get_author_details(session, author_name):
+    if (
+        not isinstance(author_name, str)
+        or not author_name.strip()
+        or author_name == "Unknown"
+    ):
+        return {
+            "birth_date": None,
+            "death_date": None,
+            "bio": None
+        }
+
+    first_author = author_name.split(",")[0].strip()
+
+    async with author_cache_lock:
+        if first_author in author_cache:
+            return author_cache[first_author]
+
+    search_data = await fetch_json(
+        session,
+        "https://openlibrary.org/search/authors.json",
+        {"q": first_author}
+    )
+
+    result = {
+        "birth_date": None,
+        "death_date": None,
+        "bio": None
+    }
+
+    if search_data and search_data.get("docs"):
+        author_key = search_data["docs"][0].get("key")
+
+        if author_key:
+            author_data = await fetch_json(
+                session,
+                f"https://openlibrary.org/authors/{author_key}.json"
+            )
+
+            if author_data:
+                bio = author_data.get("bio", "")
+
+                if isinstance(bio, dict):
+                    bio = bio.get("value", "")
+
+                result = {
+                    "birth_date": author_data.get("birth_date"),
+                    "death_date": author_data.get("death_date"),
+                    "bio": (bio[:300] if bio else None)
+                }
+
+    async with author_cache_lock:
+        author_cache[first_author] = result
+
+        with open(author_cache_file, "w", encoding="utf-8") as f:
+            json.dump(
+                author_cache,
+                f,
+                ensure_ascii=False,
+                indent=2
+            )
+
+    return result
+
+
+async def process_one_book(session, semaphore, idx, total):
+    global processed_count
+
+    work_key = df.at[idx, "Open_Library_Key"]
+
+    if not isinstance(work_key, str) or work_key in completed_keys:
+        return
+
+    title = df.at[idx, "Title"]
+    author_name = df.at[idx, "Author"]
+
+    async with semaphore:
+        ratings_task = fetch_json(
+            session,
+            f"https://openlibrary.org{work_key}/ratings.json"
+        )
+
+        shelves_task = fetch_json(
+            session,
+            f"https://openlibrary.org{work_key}/bookshelves.json"
+        )
+
+        editions_task = fetch_json(
+            session,
+            f"https://openlibrary.org{work_key}/editions.json",
+            {"limit": 5}
+        )
+
+        author_task = get_author_details(
+            session,
+            author_name
+        )
+
+        ratings_data, shelves_data, editions_data, author_details = await asyncio.gather(
+            ratings_task,
+            shelves_task,
+            editions_task,
+            author_task
+        )
+
+    if ratings_data and "summary" in ratings_data:
+        df.at[idx, "Average_Rating"] = ratings_data["summary"].get("average")
+        df.at[idx, "Rating_Count"] = ratings_data["summary"].get("count")
+
+    if shelves_data and "counts" in shelves_data:
+        df.at[idx, "Want_To_Read_Count"] = shelves_data["counts"].get("want_to_read")
+        df.at[idx, "Currently_Reading_Count"] = shelves_data["counts"].get("currently_reading")
+        df.at[idx, "Already_Read_Count"] = shelves_data["counts"].get("already_read")
+
+    if editions_data and "entries" in editions_data:
+        for ed in editions_data["entries"]:
+            if ed.get("number_of_pages"):
+                df.at[idx, "Page_Count"] = ed["number_of_pages"]
+                break
+
+    df.at[idx, "Author_Birth_Date"] = author_details["birth_date"]
+    df.at[idx, "Author_Death_Date"] = author_details["death_date"]
+    df.at[idx, "Author_Bio"] = author_details["bio"]
+
+    async with progress_lock:
+        completed_keys.add(work_key)
+
+        with open(enrich_progress_file, "a", encoding="utf-8") as f:
+            f.write(work_key + "\n")
+
+        processed_count += 1
+
+        print(f"[{processed_count}/{total}] Completed: {title}")
+
+        if processed_count % SAVE_EVERY == 0:
+            df.to_csv(
+                csv_file,
+                index=False,
+                encoding="utf-8-sig"
+            )
+
+            elapsed = time.time() - start_time
+            speed = processed_count / elapsed
+            remaining = (
+                (total - processed_count) / speed
+                if speed > 0
+                else 0
+            )
+
+            print(
+                f"   Checkpoint saved | Speed: {speed:.2f} books/second | "
+                f"Estimated remaining time: {remaining / 60:.1f} minutes"
+            )
+
+
+async def main():
+    rows_to_process = [
+        idx for idx in df.index
+        if isinstance(df.at[idx, "Open_Library_Key"], str)
+        and df.at[idx, "Open_Library_Key"] not in completed_keys
+    ]
+
+    if ENRICH_LIMIT is not None:
+        rows_to_process = rows_to_process[:ENRICH_LIMIT]
+
+    total = len(rows_to_process)
+
+    print(
+        f"Remaining: {total} books, running with "
+        f"{MAX_CONCURRENT} concurrent connections...\n"
+    )
+
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT)
+
+    connector = aiohttp.TCPConnector(
+        limit=MAX_CONCURRENT
+    )
+
+    async with aiohttp.ClientSession(
+        connector=connector
+    ) as session:
+
+        tasks = [
+            process_one_book(
+                session,
+                semaphore,
+                idx,
+                total
+            )
+            for idx in rows_to_process
+        ]
+
+        await asyncio.gather(*tasks)
+
+    df.to_csv(
+        csv_file,
+        index=False,
+        encoding="utf-8-sig"
+    )
+
+    elapsed = time.time() - start_time
+
+    print(
+        f"\nEnrichment completed! "
+        f"{processed_count} books were updated."
+    )
+
+    print(
+        f"Total time: {elapsed / 60:.1f} minutes"
+    )
+
+    print(
+        f"Complete data saved to: {csv_file}"
+    )
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```

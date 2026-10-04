@@ -1,0 +1,78 @@
+================================================================
+STEP 1 — RAW DATA
+================================================================
+Rows: 2081   Columns: 17
+Missing values per column (raw):
+   Average_Rating             1667  (80%)
+   Rating_Count               1667  (80%)
+   Page_Count                 1728  (83%)
+   Want_To_Read_Count         1661  (80%)
+   Currently_Reading_Count    1661  (80%)
+   Already_Read_Count         1661  (80%)
+   Author_Birth_Date          1661  (80%)
+   Author_Death_Date          1755  (84%)
+   Author_Bio                 1691  (81%)
+
+STEP 2 — FIX FORMATTING
+   Author strings cleaned (duplicates/'Adapted by' removed): 31
+   New columns: Primary_Author, Author_Count (multi-author books: 220)
+
+STEP 3 — STANDARDIZE GENRES
+   e.g. 'science_fiction' -> 'Sci-Fi', 'young_adult' -> 'Young Adult'
+
+STEP 4 — STANDARDIZE DATES
+   Author_Birth_Date: 37 different raw patterns -> one ISO format
+   Author_Death_Date: 30 different raw patterns -> one ISO format
+
+STEP 5 — REMOVE INCORRECT / IMPOSSIBLE VALUES
+   Publish_Year outside 1450–2026 (e.g. 0) -> set missing: 2
+   Placeholder years 1800/1900 (century guesses, not real dates) -> set missing: 76
+   Publish_Year earlier than author's birth+10 -> set missing: 10
+      · The Red Badge of Courage (Stephen Crane): published 1855, author born 1871
+      · Le Comte de Monte-Cristo, II (Alexandre Dumas): published 1830, author born 1824
+      · Women in Love (D. H. Lawrence): published 1877, author born 1885
+      · Americanah (Chimamanda Ngozi Adichie): published 1969, author born 1977
+      · Seta (Alessandro Baricco): published 1920, author born 1958
+      · Hold the dream (Barbara Taylor Bradford): published 1625, author born 1933
+      · Galápagos (Kurt Vonnegut): published 1820, author born 1922
+      · The Fall of the House of Usher (Edgar Allan Poe): published 1704, author born 1809
+      · More Scary Stories to Tell in the Dark (Alvin Schwartz): published 1605, author born 1927
+      · The Red Badge of Courage (Stephen Crane): published 1871, author born 1871
+   Death year before birth year -> removed: 0
+   Average_Rating = 0 with 0 ratings -> set missing: 36
+   Average_Rating outside 1–5 -> set missing: 0
+   Page_Count < 30 -> set missing: 3
+
+STEP 6 — REMOVE DUPLICATES
+   · 'Преступление и наказание' by Fiódor Dostoievski appeared 2x (Mystery, Historical Fiction) -> merged
+   · 'Анна Каренина' by Лев Толстой appeared 2x (Romance, Historical Fiction) -> merged
+   · 'Dracula's Guest and Other Weird Stories' by Bram Stoker appeared 2x (Horror, Horror) -> merged
+   · 'Pride and Prejudice' by Jane Austen appeared 2x (Romance, Historical Fiction) -> merged
+   · 'The Red Badge of Courage' by Stephen Crane appeared 2x (Thriller, Historical Fiction) -> merged
+   · 'Vampire Academy' by Richelle Mead appeared 2x (Romance, Young Adult) -> merged
+   Rows removed: 6
+   Same title / different author (e.g. 'The Hollow' Christie vs Roberts) kept — different books.
+
+STEP 7 — HANDLE MISSING VALUES
+   Enrichment (ratings / shelves / author info) exists for 419 of 2075 books (20%). The enrichment script had not finished for the rest.
+   -> These are NOT filled with averages (that would invent data). Analyses on ratings/
+      engagement use only the enriched subset; flag column Is_Enriched added.
+   Page_Count: 97 enriched books filled with their genre median (flagged in Page_Count_Imputed)
+
+STEP 8 — TRANSFORMATION (new features)
+   Added: Decade, Era, Book_Age, Total_Readers, Completion_Rate, Length_Category,
+          Popularity_Tier, Author_Age_At_Publish, Author_Status, Primary_Author, Author_Count
+
+================================================================
+READY DATASET
+================================================================
+Rows: 2081 -> 2075   Columns: 17 -> 33
+
+KEY INSIGHTS
+   Largest genre: Romance (281), smallest: Fantasy (228)
+   Median publish year: 1979; busiest decade: 2000s (308 books)
+   Highest rated genre: Young Adult (4.34); lowest: Fantasy (3.80)
+   Most wanted book: Fifty Shades of Grey (6030 want-to-read)
+   Median length: 308 pages
+   Ebooks: 90% overall; highest in Thriller (100%)
+   Editions vs rating correlation r = 0.09 (popular ≠ necessarily better rated)
